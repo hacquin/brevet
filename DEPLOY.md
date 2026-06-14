@@ -6,26 +6,26 @@ Architecture cible : **Caddy** (HTTPS automatique) en façade → **app Node** (
 Internet → Caddy (443, HTTPS) → 127.0.0.1:3001 (Node) → API Claude
 ```
 
-> Remplacez partout `revise.mondomaine.fr` par votre domaine, `VOTRE_IP` par l'IP du VPS, et `URL_DU_DEPOT.git` par l'URL de votre dépôt Git.
+> Domaine : **brevet.hacquin.net** · VPS : **151.80.235.190** (OVH). Remplacez `URL_DU_DEPOT.git` par l'URL de votre dépôt Git.
 
 ---
 
-## 0. Pré-requis : le domaine (DNS)
+## 0. Pré-requis : le domaine (DNS chez OVH)
 
-Chez votre registrar (OVH, Gandi, Cloudflare…), créez un enregistrement **A** :
+Dans l'espace OVH → Noms de domaine → **hacquin.net** → **Zone DNS** → **Ajouter une entrée** :
 
-| Type | Nom | Valeur |
-|------|-----|--------|
-| A | `revise` (ou `@`) | `VOTRE_IP` |
+| Type | Sous-domaine | Cible |
+|------|--------------|-------|
+| A | `brevet` | `151.80.235.190` |
 
-Attendez quelques minutes que ça se propage. Vérifiez : `ping revise.mondomaine.fr` doit renvoyer l'IP du VPS.
+Attendez quelques minutes que ça se propage. Vérifiez : `dig +short A brevet.hacquin.net` doit renvoyer `151.80.235.190`.
 
 ---
 
 ## 1. Se connecter au VPS
 
 ```bash
-ssh root@VOTRE_IP        # ou votre utilisateur habituel
+ssh root@151.80.235.190        # ou votre utilisateur habituel
 ```
 
 ## 2. Installer Node.js 22 (LTS)
@@ -109,50 +109,73 @@ sudo systemctl status brevet      # doit être "active (running)"
 curl http://127.0.0.1:3001/api/health   # {"ok":true,...}
 ```
 
-## 7. Installer Caddy (reverse proxy + HTTPS auto)
+## 7. Ajouter un virtual host dans nginx (déjà installé)
+
+> Ce VPS fait déjà tourner **nginx** avec d'autres sites. On ajoute simplement un
+> nouveau site pour `brevet.hacquin.net` — sans toucher à l'existant.
+
+Créez le fichier de configuration :
 
 ```bash
-sudo apt-get install -y debian-keyring debian-archive-keyring apt-transport-https curl
-curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' | sudo gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg
-curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt' | sudo tee /etc/apt/sources.list.d/caddy-stable.list
-sudo apt-get update && sudo apt-get install -y caddy
+sudo nano /etc/nginx/sites-available/brevet.hacquin.net
 ```
 
-Configurez :
+Collez :
 
-```bash
-sudo nano /etc/caddy/Caddyfile
-```
+```nginx
+server {
+    listen 80;
+    listen [::]:80;
+    server_name brevet.hacquin.net;
 
-Remplacez tout le contenu par (avec votre domaine) :
-
-```
-revise.mondomaine.fr {
-    reverse_proxy 127.0.0.1:3001
-    encode gzip
+    location / {
+        proxy_pass http://127.0.0.1:3001;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
 }
 ```
 
-Rechargez :
+Activez le site et rechargez nginx :
 
 ```bash
-sudo systemctl reload caddy
+sudo ln -s /etc/nginx/sites-available/brevet.hacquin.net /etc/nginx/sites-enabled/
+sudo nginx -t          # vérifie la config (doit dire "syntax is ok" / "test is successful")
+sudo systemctl reload nginx
 ```
 
-Caddy obtient automatiquement un certificat HTTPS (Let's Encrypt) pour votre domaine.
+À ce stade, **http://brevet.hacquin.net** doit déjà afficher l'app (en HTTP).
 
-## 8. Ouvrir le pare-feu (si UFW est actif)
+## 8. Activer le HTTPS (Let's Encrypt via certbot)
 
 ```bash
-sudo ufw allow 80
-sudo ufw allow 443
-sudo ufw allow OpenSSH
-sudo ufw enable
+sudo apt-get install -y certbot python3-certbot-nginx
+sudo certbot --nginx -d brevet.hacquin.net
 ```
+
+Certbot demande un email, fait accepter les conditions, obtient le certificat et
+**modifie tout seul** le virtual host pour ajouter le HTTPS + la redirection
+HTTP→HTTPS. Choisissez l'option de redirection quand il la propose.
+
+Le renouvellement est automatique (timer systemd `certbot.timer`).
 
 ## ✅ C'est en ligne
 
-Ouvrez **https://revise.mondomaine.fr** — c'est le lien à partager.
+Ouvrez **https://brevet.hacquin.net** — c'est le lien à partager. Ton site existant
+sur le VPS continue de fonctionner normalement à côté.
+
+## Pare-feu
+
+Les ports 80/443 sont déjà ouverts (nginx tourne déjà), donc rien à changer.
+Si UFW est actif, vérifiez juste que « Nginx Full » est autorisé :
+
+```bash
+sudo ufw status
+sudo ufw allow 'Nginx Full'   # si besoin
+```
 
 ---
 
